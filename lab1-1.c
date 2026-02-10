@@ -12,29 +12,40 @@ typedef enum {
 } Gender;
 
 typedef struct {
+    Gender batch_gender;   // какой пол сейчас обслуживается
+    int batch_left;        // сколько входов осталось в пачке
+} Board;
+
+typedef struct {
+    int people_in_bathroom;
+    Board board;
+} BathroomInfo;
+
+typedef struct {
     int id;
     Gender gender;
     int usage_time;
 } Student;
 
-typedef struct {
-    Gender current_gender; // состояние ванной (пол)
-    int people_in_bathroom; // количество людей в ванной
-} BathroomInfo;
+pthread_mutex_t mutex;
+pthread_cond_t cond;
+sem_t cabins_sem;
 
-sem_t semaph; // семафор
-pthread_mutex_t mutex;  // мьютекс
-pthread_cond_t cond; // condition variable
+BathroomInfo* bathroom;
 
-BathroomInfo* bathroom; // ванная 
-int max_usage_time = 10, users_amt = 10, cabins = 5;
+int users_amt = 10;        // -s
+int max_usage_time = 10;   // -u
+int cabins = 5;            // -c
+int BATCH_SIZE = cabins;        // -b
 
-void parse_args(int argc, char *argv[])
+int waiting_male = 0;
+int waiting_female = 0;
+
+void parse_args(int argc, char* argv[])
 {
     int opt;
-
-    while ((opt = getopt(argc, argv, "s:u:c:")) != -1) {
-        switch (opt) {
+    while ((opt = getopt(argc, argv, "s:u:c:b:")) != -1) {
+        switch(opt) {
             case 's':
                 users_amt = atoi(optarg);
                 break;
@@ -44,109 +55,138 @@ void parse_args(int argc, char *argv[])
             case 'c':
                 cabins = atoi(optarg);
                 break;
+            case 'b':
+                BATCH_SIZE = atoi(optarg);
+                break;
             default:
                 fprintf(stderr,
-                        "Usage: %s [-s students_amount] [-u max_bathroom_usage_time] [-c cabins_amount]\n",
+                        "Usage: %s [-s students_amount] [-u max_usage_time] [-c cabins] [-b batch_size]\n",
                         argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
-    if (users_amt <= 0 || max_usage_time <= 0 || cabins <= 0) {
-        fprintf(stderr, "All parameters must be positive\n");
+    if (users_amt <= 0 || max_usage_time <= 0 || cabins <= 0 || BATCH_SIZE <= 0 || BATCH_SIZE < cabins) {
+        fprintf(stderr, "All parameters must be positive numbers\n");
         exit(EXIT_FAILURE);
     }
 }
 
-
 void* student(void* arg)
 {
-    Student* student_info = (Student *) arg; // пол студента
-    printf("Student %d (%s) wants to go in\n", student_info->id, student_info->gender == MALE ? "male" : "female" );
+    Student* s = (Student*)arg;
 
-    pthread_mutex_lock(&mutex); // захватили мьютекс
-    
-    while (bathroom->current_gender != student_info->gender && bathroom->people_in_bathroom > 0) 
-    // ждём условие: либо ванная опустела, либо пол стал подходить
+    printf("Student %d (%s) wants to enter\n",
+           s->id, s->gender == MALE ? "male" : "female");
+
+    pthread_mutex_lock(&mutex);
+
+    if (s->gender == MALE) waiting_male++;
+    else waiting_female++;
+
+    // в каких случаях мы можем войти?
+    // если табло совпадает с нашим полом и пачка не пустая
+    // либо если табло не проинициализировано (первый пришедший студент, условно)
+    while (bathroom->board.batch_gender != NONE && !(bathroom->board.batch_gender == s->gender && bathroom->board.batch_left > 0) ) 
     {
         pthread_cond_wait(&cond, &mutex);
     }
 
-    pthread_mutex_unlock(&mutex); // освободили мьютекс
+    if (s->gender == MALE) waiting_male--;
+    else waiting_female--;
 
-    sem_wait(&semaph); // захватили семафор 
+    // если табло не было проинициализировано - инициализируем табло
+    if (bathroom->board.batch_gender == NONE) {
 
-    pthread_mutex_lock(&mutex); // захватили мьютекс
-    printf("Student %d (%s) is using the bathroom\n", student_info->id, student_info->gender == MALE ? "male" : "female" );
+        bathroom->board.batch_gender = s->gender;
+        bathroom->board.batch_left = BATCH_SIZE;
 
-    bathroom->people_in_bathroom += 1; // увеличиваем количество людей в кабинке
-    if (bathroom->people_in_bathroom == 1) // если это первый человек в ванной - устанавливаем пол
-    {
-        bathroom->current_gender = student_info->gender;
+        printf("Board initialized: %s batch\n",
+               s->gender == MALE ? "male" : "female");
     }
 
-    printf("\tPeople in bathroom currently: %d\n", bathroom->people_in_bathroom);
+    bathroom->board.batch_left--;
 
-    pthread_mutex_unlock(&mutex); // освободили мьютекс
-    
-    sleep(student_info->usage_time); // используем ванную
+    pthread_mutex_unlock(&mutex);
 
-    printf("Student %d (%s) has finished using the bathroom\n", student_info->id, student_info->gender == MALE ? "male" : "female" );
+    sem_wait(&cabins_sem);
 
-    pthread_mutex_lock(&mutex); // захватили мьютекс
+    pthread_mutex_lock(&mutex);
 
-    bathroom->people_in_bathroom -= 1; // освобождаем ванную - уменьшаем количество людей
-    if (bathroom->people_in_bathroom == 0) // если мы были последним человеком - будим всех
-    {
-        bathroom->current_gender = NONE;
-        pthread_cond_broadcast(&cond); 
+    bathroom->people_in_bathroom++;
+    printf("Student %d (%s) entered | in bathroom: %d | batch left: %d\n",
+           s->id,
+           s->gender == MALE ? "male" : "female",
+           bathroom->people_in_bathroom,
+           bathroom->board.batch_left);
+
+    pthread_mutex_unlock(&mutex);
+
+    sleep(s->usage_time);
+
+    printf("Student %d (%s) leaves\n",
+           s->id, s->gender == MALE ? "male" : "female");
+
+    pthread_mutex_lock(&mutex);
+
+    bathroom->people_in_bathroom--;
+
+    if (bathroom->people_in_bathroom == 0) {
+        int waiting_current = (bathroom->board.batch_gender == MALE) ? waiting_male : waiting_female;
+
+  
+        if (bathroom->board.batch_left == 0 || waiting_current == 0)
+        {
+            bathroom->board.batch_gender =
+                (bathroom->board.batch_gender == MALE) ? FEMALE : MALE;
+            bathroom->board.batch_left = BATCH_SIZE;
+
+            printf("Board switched to %s\n",
+                bathroom->board.batch_gender == MALE ? "male" : "female");
+
+            pthread_cond_broadcast(&cond);
+        }
     }
-    
-    pthread_mutex_unlock(&mutex); // освободили мьютекс
-    sem_post(&semaph); // освободили семафор
+
+    pthread_mutex_unlock(&mutex);
+    sem_post(&cabins_sem);
 
     return NULL;
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
-    parse_args(argc, argv);
+    parse_args(argc, argv); 
 
     srand(time(NULL));
-    setbuf(stdout, 0);
+    setbuf(stdout, NULL);
 
     bathroom = malloc(sizeof(BathroomInfo));
-
-    bathroom->current_gender = NONE;
     bathroom->people_in_bathroom = 0;
+    bathroom->board.batch_gender = NONE;
+    bathroom->board.batch_left = BATCH_SIZE;
 
-    pthread_t students[users_amt];
-
-    Student* students_info = malloc(users_amt * sizeof(Student));
-    for (size_t i = 0; i < users_amt; i++)
-    {
-        Student* s = &students_info[i];
-        s->id = i;
-        s->gender = (rand() % 2) ? MALE : FEMALE;
-        s->usage_time = rand() % max_usage_time + 1;
-    }
-
-    pthread_cond_init(&cond, NULL);
     pthread_mutex_init(&mutex, NULL);
-    sem_init(&semaph, 0, cabins);
-    
+    pthread_cond_init(&cond, NULL);
+    sem_init(&cabins_sem, 0, cabins);
+
+    pthread_t threads[users_amt];
+    Student* students_info = malloc(users_amt * sizeof(Student));
+
     for (int i = 0; i < users_amt; i++) {
-        pthread_create(&students[i], NULL, student, &students_info[i]);
+        students_info[i].id = i;
+        students_info[i].gender = rand() % 2 ? MALE : FEMALE;
+        students_info[i].usage_time = rand() % max_usage_time + 1;
+        pthread_create(&threads[i], NULL, student, &students_info[i]);
     }
 
     for (int i = 0; i < users_amt; i++) {
-        pthread_join(students[i], NULL);
+        pthread_join(threads[i], NULL);
     }
 
-    sem_destroy(&semaph);
+    sem_destroy(&cabins_sem);
     pthread_mutex_destroy(&mutex);
     pthread_cond_destroy(&cond);
-
     free(students_info);
     free(bathroom);
 
