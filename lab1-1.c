@@ -13,7 +13,6 @@ typedef enum {
 
 typedef struct {
     Gender batch_gender;   // какой пол сейчас обслуживается
-    int batch_left;        // сколько входов осталось в пачке
 } Board;
 
 typedef struct {
@@ -31,12 +30,79 @@ pthread_mutex_t mutex;
 pthread_cond_t cond;
 sem_t cabins_sem;
 
+typedef struct Node {
+    int data;              // храним id студентов
+    struct Node* next;
+} Node;
+
+typedef struct {
+    Node* head;            // первый элемент
+    Node* tail;            // последний элемент
+    int size;
+} Queue;
+
+void queue_init(Queue* q)
+{
+    q->head = NULL;
+    q->tail = NULL;
+    q->size = 0;
+}
+
+void queue_push(Queue* q, int data)
+{
+    Node* n = malloc(sizeof(Node));
+    n->data = data;
+    n->next = NULL;
+
+    if (q->tail == NULL) {
+        q->head = q->tail = n;
+    } else {
+        q->tail->next = n;
+        q->tail = n;
+    }
+
+    q->size++;
+}
+
+int queue_peek(Queue* q)
+{
+    if (q->head == NULL)
+        return -1;
+
+    return q->head->data;
+}
+
+int queue_pop(Queue* q)
+{
+    if (q->head == NULL)
+        return -1;
+
+    Node* n = q->head;
+    int data = n->data;
+
+    q->head = n->next;
+    if (q->head == NULL)
+        q->tail = NULL;
+
+    free(n);
+    q->size--;
+
+    return data;
+}
+
+int queue_empty(Queue* q)
+{
+    return q->size == 0;
+}
+
+
 BathroomInfo* bathroom;
+Queue queue_women, queue_men;
 
 int users_amt = 10;        // -s
 int max_usage_time = 10;   // -u
 int cabins = 5;            // -c
-int BATCH_SIZE = cabins;        // -b
+int BATCH_SIZE = 5;        // -b
 
 int waiting_male = 0;
 int waiting_female = 0;
@@ -81,31 +147,38 @@ void* student(void* arg)
 
     pthread_mutex_lock(&mutex);
 
-    if (s->gender == MALE) waiting_male++;
+    Queue* student_queue;
+
+    if (s->gender == MALE) student_queue = &queue_men;
+    else student_queue = &queue_women;
+
+    queue_push(student_queue, s->id);
+
+    if (s->gender == MALE) waiting_male++; // ?
     else waiting_female++;
 
     // в каких случаях мы можем войти?
     // если табло совпадает с нашим полом и пачка не пустая
     // либо если табло не проинициализировано (первый пришедший студент, условно)
-    while (bathroom->board.batch_gender != NONE && !(bathroom->board.batch_gender == s->gender && bathroom->board.batch_left > 0) ) 
+    while (bathroom->board.batch_gender != NONE && !(queue_peek(student_queue) == s->id && bathroom->board.batch_gender == s->gender && 
+         bathroom->people_in_bathroom < cabins) ) 
     {
         pthread_cond_wait(&cond, &mutex);
     }
 
-    if (s->gender == MALE) waiting_male--;
+    if (s->gender == MALE) waiting_male--; // ?
     else waiting_female--;
+
+    if (s->gender == MALE) queue_pop(&queue_men);
+    else queue_pop(&queue_women);
 
     // если табло не было проинициализировано - инициализируем табло
     if (bathroom->board.batch_gender == NONE) {
 
         bathroom->board.batch_gender = s->gender;
-        bathroom->board.batch_left = BATCH_SIZE;
-
-        printf("Board initialized: %s batch\n",
+        printf("Board initialized: %s \n",
                s->gender == MALE ? "male" : "female");
     }
-
-    bathroom->board.batch_left--;
 
     pthread_mutex_unlock(&mutex);
 
@@ -114,11 +187,12 @@ void* student(void* arg)
     pthread_mutex_lock(&mutex);
 
     bathroom->people_in_bathroom++;
-    printf("Student %d (%s) entered | in bathroom: %d | batch left: %d\n",
+    pthread_cond_broadcast(&cond);
+
+    printf("Student %d (%s) entered | in bathroom: %d\n",
            s->id,
            s->gender == MALE ? "male" : "female",
-           bathroom->people_in_bathroom,
-           bathroom->board.batch_left);
+           bathroom->people_in_bathroom);
 
     pthread_mutex_unlock(&mutex);
 
@@ -132,20 +206,26 @@ void* student(void* arg)
     bathroom->people_in_bathroom--;
 
     if (bathroom->people_in_bathroom == 0) {
-        int waiting_current = (bathroom->board.batch_gender == MALE) ? waiting_male : waiting_female;
+        int waiting_opposite = (bathroom->board.batch_gender == MALE) ? waiting_female : waiting_male;
 
   
-        if (bathroom->board.batch_left == 0 || waiting_current == 0)
+        if (waiting_opposite != 0)
         {
             bathroom->board.batch_gender =
                 (bathroom->board.batch_gender == MALE) ? FEMALE : MALE;
-            bathroom->board.batch_left = BATCH_SIZE;
 
             printf("Board switched to %s\n",
                 bathroom->board.batch_gender == MALE ? "male" : "female");
 
-            pthread_cond_broadcast(&cond);
         }
+        else
+        {
+            printf("Board left %s\n",
+                bathroom->board.batch_gender == MALE ? "male" : "female");
+
+        }
+        pthread_cond_broadcast(&cond);
+
     }
 
     pthread_mutex_unlock(&mutex);
@@ -161,10 +241,12 @@ int main(int argc, char* argv[])
     srand(time(NULL));
     setbuf(stdout, NULL);
 
+    queue_init(&queue_women);
+    queue_init(&queue_men);
+
     bathroom = malloc(sizeof(BathroomInfo));
     bathroom->people_in_bathroom = 0;
     bathroom->board.batch_gender = NONE;
-    bathroom->board.batch_left = BATCH_SIZE;
 
     pthread_mutex_init(&mutex, NULL);
     pthread_cond_init(&cond, NULL);
