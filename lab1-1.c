@@ -150,9 +150,10 @@ void* student(void* arg)
     queue_push(student_queue, s->id);
 
     // в каких случаях мы можем войти?
-    // если нас позвали, при этом табличка совпадает с нашим полом и подошла наша очередь
+    // если нас позвали, при этом табличка совпадает с нашим полом, подошла наша очередь и есть свободная кабинка
     // либо если табличка не проинициализирована (первый пришедший студент)
-    while (bathroom->current_gender != NONE && !(queue_peek(student_queue) == s->id && bathroom->current_gender == s->gender )) 
+    while (bathroom->current_gender != NONE && !(queue_peek(student_queue) == s->id && bathroom->current_gender == s->gender &&
+        bathroom->taken_cabins < cabins)) 
     {
         pthread_cond_wait(&cond, &mutex);
     }
