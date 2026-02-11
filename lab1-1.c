@@ -102,7 +102,6 @@ Queue queue_women, queue_men;
 int users_amt = 10;        // -s
 int max_usage_time = 10;   // -u
 int cabins = 5;            // -c
-int BATCH_SIZE = 5;        // -b
 
 int waiting_male = 0;
 int waiting_female = 0;
@@ -121,18 +120,15 @@ void parse_args(int argc, char* argv[])
             case 'c':
                 cabins = atoi(optarg);
                 break;
-            case 'b':
-                BATCH_SIZE = atoi(optarg);
-                break;
             default:
                 fprintf(stderr,
-                        "Usage: %s [-s students_amount] [-u max_usage_time] [-c cabins] [-b batch_size]\n",
+                        "Usage: %s [-s students_amount] [-u max_usage_time] [-c cabins]\n",
                         argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
-    if (users_amt <= 0 || max_usage_time <= 0 || cabins <= 0 || BATCH_SIZE <= 0 || BATCH_SIZE < cabins) {
+    if (users_amt <= 0 || max_usage_time <= 0 || cabins <= 0) {
         fprintf(stderr, "All parameters must be positive numbers\n");
         exit(EXIT_FAILURE);
     }
